@@ -17,6 +17,9 @@
 (define-constant err-contribution-not-found (err u106))
 (define-constant err-not-approved (err u107))
 (define-constant err-mint-disabled (err u108))
+(define-constant err-invalid-relationship (err u109))
+(define-constant err-relationship-exists (err u110))
+(define-constant err-self-relationship (err u111))
 
 (define-data-var last-token-id uint u0)
 (define-data-var mint-enabled bool true)
@@ -44,6 +47,7 @@
 (define-map token-approvals uint principal)
 (define-map operator-approvals {owner: principal, operator: principal} bool)
 (define-map verifiers principal bool)
+(define-map family-relationships {ancestor: uint, descendant: uint} (string-ascii 20))
 
 (define-public (get-last-token-id)
     (ok (var-get last-token-id))
@@ -75,6 +79,18 @@
 
 (define-read-only (is-verifier (user principal))
     (default-to false (map-get? verifiers user))
+)
+
+(define-read-only (get-family-relationship (ancestor-id uint) (descendant-id uint))
+    (map-get? family-relationships {ancestor: ancestor-id, descendant: descendant-id})
+)
+
+(define-read-only (get-ancestors (token-id uint))
+    (ok "Use family-relationships map to find ancestors")
+)
+
+(define-read-only (get-descendants (token-id uint))
+    (ok "Use family-relationships map to find descendants")
 )
 
 (define-public (mint-ancestry-nft 
@@ -267,6 +283,42 @@
 
 (define-read-only (get-token-count)
     (var-get last-token-id)
+)
+
+(define-public (link-family-members (ancestor-id uint) (descendant-id uint) (relationship (string-ascii 20)))
+    (let 
+        (
+            (ancestor-owner (unwrap! (nft-get-owner? ancestry-nft ancestor-id) err-token-not-found))
+            (descendant-owner (unwrap! (nft-get-owner? ancestry-nft descendant-id) err-token-not-found))
+        )
+        (asserts! (not (is-eq ancestor-id descendant-id)) err-self-relationship)
+        (asserts! (or (is-eq tx-sender ancestor-owner) (is-eq tx-sender descendant-owner)) err-not-token-owner)
+        (asserts! (is-none (map-get? family-relationships {ancestor: ancestor-id, descendant: descendant-id})) err-relationship-exists)
+        (asserts! (or 
+            (is-eq relationship "parent")
+            (is-eq relationship "grandparent")
+            (is-eq relationship "great-grandparent")
+            (is-eq relationship "sibling")
+            (is-eq relationship "cousin")
+            (is-eq relationship "uncle")
+            (is-eq relationship "aunt")
+        ) err-invalid-relationship)
+        (map-set family-relationships {ancestor: ancestor-id, descendant: descendant-id} relationship)
+        (ok true)
+    )
+)
+
+(define-public (remove-family-link (ancestor-id uint) (descendant-id uint))
+    (let 
+        (
+            (ancestor-owner (unwrap! (nft-get-owner? ancestry-nft ancestor-id) err-token-not-found))
+            (descendant-owner (unwrap! (nft-get-owner? ancestry-nft descendant-id) err-token-not-found))
+        )
+        (asserts! (or (is-eq tx-sender ancestor-owner) (is-eq tx-sender descendant-owner)) err-not-token-owner)
+        (asserts! (is-some (map-get? family-relationships {ancestor: ancestor-id, descendant: descendant-id})) err-token-not-found)
+        (map-delete family-relationships {ancestor: ancestor-id, descendant: descendant-id})
+        (ok true)
+    )
 )
 
 (define-read-only (get-contract-info)
