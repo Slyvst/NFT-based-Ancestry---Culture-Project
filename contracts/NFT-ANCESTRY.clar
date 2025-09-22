@@ -20,10 +20,18 @@
 (define-constant err-invalid-relationship (err u109))
 (define-constant err-relationship-exists (err u110))
 (define-constant err-self-relationship (err u111))
+(define-constant err-no-heritage-data (err u112))
+(define-constant err-matching-disabled (err u113))
+(define-constant err-match-not-found (err u114))
+(define-constant err-already-matched (err u115))
+(define-constant err-insufficient-compatibility (err u116))
 
 (define-data-var last-token-id uint u0)
 (define-data-var mint-enabled bool true)
 (define-data-var verification-required bool false)
+(define-data-var heritage-matching-enabled bool true)
+(define-data-var min-compatibility-score uint u60)
+(define-data-var next-match-id uint u1)
 
 (define-map token-uri uint (string-ascii 256))
 (define-map heritage-stories uint {
@@ -48,6 +56,30 @@
 (define-map operator-approvals {owner: principal, operator: principal} bool)
 (define-map verifiers principal bool)
 (define-map family-relationships {ancestor: uint, descendant: uint} (string-ascii 20))
+
+(define-map heritage-patterns uint {
+    cultural-keywords: (list 5 (string-ascii 30)),
+    geographic-region: (string-ascii 100),
+    time-era: (string-ascii 50),
+    tradition-type: (string-ascii 50),
+    language-family: (string-ascii 30),
+    analyzed: bool
+})
+
+(define-map cultural-matches uint {
+    token-a: uint,
+    token-b: uint,
+    compatibility-score: uint,
+    match-factors: (list 3 (string-ascii 30)),
+    discovered-at: uint,
+    connection-confirmed: bool
+})
+
+(define-map heritage-connections {requester: uint, target: uint} {
+    requested-at: uint,
+    accepted: bool,
+    match-id: uint
+})
 
 (define-public (get-last-token-id)
     (ok (var-get last-token-id))
@@ -321,11 +353,198 @@
     )
 )
 
+(define-public (analyze-heritage-pattern (token-id uint))
+    (let (
+        (story (unwrap! (map-get? heritage-stories token-id) err-story-not-found))
+        (contribution (unwrap! (map-get? historical-contributions token-id) err-contribution-not-found))
+        (owner (unwrap! (nft-get-owner? ancestry-nft token-id) err-token-not-found))
+    )
+        (asserts! (is-eq tx-sender owner) err-not-token-owner)
+        (asserts! (var-get heritage-matching-enabled) err-matching-disabled)
+        (let (
+            (keywords (extract-cultural-keywords (get story story) (get cultural-significance story)))
+            (region (normalize-geographic-region (get location story)))
+            (era (normalize-time-period (get time-period story) (get historical-period contribution)))
+            (tradition (categorize-tradition-type (get contribution-type contribution)))
+            (language (derive-language-family region))
+        )
+            (map-set heritage-patterns token-id {
+                cultural-keywords: keywords,
+                geographic-region: region,
+                time-era: era,
+                tradition-type: tradition,
+                language-family: language,
+                analyzed: true
+            })
+            (ok true)
+        )
+    )
+)
+
+(define-public (discover-heritage-matches (token-id uint))
+    (let (
+        (pattern (unwrap! (map-get? heritage-patterns token-id) err-no-heritage-data))
+        (owner (unwrap! (nft-get-owner? ancestry-nft token-id) err-token-not-found))
+    )
+        (asserts! (is-eq tx-sender owner) err-not-token-owner)
+        (asserts! (get analyzed pattern) err-no-heritage-data)
+        (asserts! (var-get heritage-matching-enabled) err-matching-disabled)
+        (unwrap-panic (find-compatible-tokens token-id pattern))
+        (ok true)
+    )
+)
+
+(define-public (request-heritage-connection (requester-token uint) (target-token uint))
+    (let (
+        (requester-owner (unwrap! (nft-get-owner? ancestry-nft requester-token) err-token-not-found))
+        (target-owner (unwrap! (nft-get-owner? ancestry-nft target-token) err-token-not-found))
+        (existing-connection (map-get? heritage-connections {requester: requester-token, target: target-token}))
+    )
+        (asserts! (is-eq tx-sender requester-owner) err-not-token-owner)
+        (asserts! (not (is-eq requester-token target-token)) err-self-relationship)
+        (asserts! (is-none existing-connection) err-already-matched)
+        (asserts! (var-get heritage-matching-enabled) err-matching-disabled)
+        (let ((compatibility-score (calculate-compatibility-score requester-token target-token)))
+            (asserts! (>= compatibility-score (var-get min-compatibility-score)) err-insufficient-compatibility)
+            (map-set heritage-connections {requester: requester-token, target: target-token} {
+                requested-at: stacks-block-height,
+                accepted: false,
+                match-id: u0
+            })
+            (ok compatibility-score)
+        )
+    )
+)
+
+(define-public (accept-heritage-connection (requester-token uint) (target-token uint))
+    (let (
+        (target-owner (unwrap! (nft-get-owner? ancestry-nft target-token) err-token-not-found))
+        (connection (unwrap! (map-get? heritage-connections {requester: requester-token, target: target-token}) err-match-not-found))
+        (match-id (var-get next-match-id))
+    )
+        (asserts! (is-eq tx-sender target-owner) err-not-token-owner)
+        (asserts! (not (get accepted connection)) err-already-matched)
+        (let (
+            (compatibility-score (calculate-compatibility-score requester-token target-token))
+            (match-factors (determine-match-factors requester-token target-token))
+        )
+            (map-set cultural-matches match-id {
+                token-a: requester-token,
+                token-b: target-token,
+                compatibility-score: compatibility-score,
+                match-factors: match-factors,
+                discovered-at: stacks-block-height,
+                connection-confirmed: true
+            })
+            (map-set heritage-connections {requester: requester-token, target: target-token} (merge connection {
+                accepted: true,
+                match-id: match-id
+            }))
+            (var-set next-match-id (+ match-id u1))
+            (ok match-id)
+        )
+    )
+)
+
+(define-public (set-heritage-matching-enabled (enabled bool))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (var-set heritage-matching-enabled enabled)
+        (ok enabled)
+    )
+)
+
+(define-public (set-min-compatibility-score (score uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (<= score u100) err-invalid-metadata)
+        (var-set min-compatibility-score score)
+        (ok score)
+    )
+)
+
+(define-read-only (get-heritage-pattern (token-id uint))
+    (map-get? heritage-patterns token-id)
+)
+
+(define-read-only (get-cultural-match (match-id uint))
+    (map-get? cultural-matches match-id)
+)
+
+(define-read-only (get-heritage-connection (requester-token uint) (target-token uint))
+    (map-get? heritage-connections {requester: requester-token, target: target-token})
+)
+
+(define-read-only (get-heritage-matching-stats)
+    {
+        total-matches: (- (var-get next-match-id) u1),
+        matching-enabled: (var-get heritage-matching-enabled),
+        min-compatibility: (var-get min-compatibility-score)
+    }
+)
+
 (define-read-only (get-contract-info)
     {
         total-supply: (var-get last-token-id),
         mint-enabled: (var-get mint-enabled),
         verification-required: (var-get verification-required),
+        heritage-matching-enabled: (var-get heritage-matching-enabled),
+        min-compatibility-score: (var-get min-compatibility-score),
         owner: contract-owner
     }
+)
+
+(define-private (extract-cultural-keywords (story (string-ascii 500)) (significance (string-ascii 300)))
+    (list "traditional" "cultural" "historic" "ancestral" "heritage")
+)
+
+(define-private (normalize-geographic-region (location (string-ascii 100)))
+    (if (> (len location) u0) location "unknown")
+)
+
+(define-private (normalize-time-period (story-period (string-ascii 50)) (contrib-period (string-ascii 50)))
+    (if (> (len story-period) u0) story-period contrib-period)
+)
+
+(define-private (categorize-tradition-type (contribution-type (string-ascii 50)))
+    (if (> (len contribution-type) u0) contribution-type "general")
+)
+
+(define-private (derive-language-family (region (string-ascii 100)))
+    (if (> (len region) u0) "regional" "unknown")
+)
+
+(define-private (find-compatible-tokens (token-id uint) (pattern {cultural-keywords: (list 5 (string-ascii 30)), geographic-region: (string-ascii 100), time-era: (string-ascii 50), tradition-type: (string-ascii 50), language-family: (string-ascii 30), analyzed: bool}))
+    (ok true)
+)
+
+(define-private (calculate-compatibility-score (token-a uint) (token-b uint))
+    (let (
+        (pattern-a (map-get? heritage-patterns token-a))
+        (pattern-b (map-get? heritage-patterns token-b))
+    )
+        (match pattern-a
+            some-pattern-a (match pattern-b
+                some-pattern-b (let (
+                        (region-match (if (is-eq (get geographic-region some-pattern-a) (get geographic-region some-pattern-b)) u25 u0))
+                        (era-match (if (is-eq (get time-era some-pattern-a) (get time-era some-pattern-b)) u25 u0))
+                        (tradition-match (if (is-eq (get tradition-type some-pattern-a) (get tradition-type some-pattern-b)) u25 u0))
+                        (language-match (if (is-eq (get language-family some-pattern-a) (get language-family some-pattern-b)) u25 u0))
+                    )
+                    (+ region-match era-match tradition-match language-match)
+                )
+                u0
+            )
+            u0
+        )
+    )
+)
+
+(define-private (determine-match-factors (token-a uint) (token-b uint))
+    (let (
+        (pattern-a (map-get? heritage-patterns token-a))
+        (pattern-b (map-get? heritage-patterns token-b))
+    )
+        (list "geographic" "temporal" "cultural")
+    )
 )
