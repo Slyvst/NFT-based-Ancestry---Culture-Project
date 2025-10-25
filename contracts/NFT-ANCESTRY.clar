@@ -25,6 +25,10 @@
 (define-constant err-match-not-found (err u114))
 (define-constant err-already-matched (err u115))
 (define-constant err-insufficient-compatibility (err u116))
+(define-constant err-beneficiary-exists (err u117))
+(define-constant err-not-beneficiary (err u118))
+(define-constant err-vesting-active (err u119))
+(define-constant err-no-beneficiary (err u120))
 
 (define-data-var last-token-id uint u0)
 (define-data-var mint-enabled bool true)
@@ -79,6 +83,13 @@
     requested-at: uint,
     accepted: bool,
     match-id: uint
+})
+
+(define-map heritage-beneficiaries uint {
+    beneficiary: principal,
+    vesting-period: uint,
+    designated-at: uint,
+    can-claim: bool
 })
 
 (define-public (get-last-token-id)
@@ -546,5 +557,87 @@
         (pattern-b (map-get? heritage-patterns token-b))
     )
         (list "geographic" "temporal" "cultural")
+    )
+)
+
+(define-public (designate-beneficiary (token-id uint) (beneficiary principal) (vesting-blocks uint))
+    (let ((owner (unwrap! (nft-get-owner? ancestry-nft token-id) err-token-not-found)))
+        (asserts! (is-eq tx-sender owner) err-not-token-owner)
+        (asserts! (not (is-eq beneficiary owner)) err-invalid-metadata)
+        (asserts! (is-none (map-get? heritage-beneficiaries token-id)) err-beneficiary-exists)
+        (map-set heritage-beneficiaries token-id {
+            beneficiary: beneficiary,
+            vesting-period: vesting-blocks,
+            designated-at: stacks-block-height,
+            can-claim: false
+        })
+        (ok true)
+    )
+)
+
+(define-public (update-beneficiary (token-id uint) (new-beneficiary principal) (vesting-blocks uint))
+    (let ((owner (unwrap! (nft-get-owner? ancestry-nft token-id) err-token-not-found)))
+        (asserts! (is-eq tx-sender owner) err-not-token-owner)
+        (asserts! (not (is-eq new-beneficiary owner)) err-invalid-metadata)
+        (asserts! (is-some (map-get? heritage-beneficiaries token-id)) err-no-beneficiary)
+        (map-set heritage-beneficiaries token-id {
+            beneficiary: new-beneficiary,
+            vesting-period: vesting-blocks,
+            designated-at: stacks-block-height,
+            can-claim: false
+        })
+        (ok true)
+    )
+)
+
+(define-public (revoke-beneficiary (token-id uint))
+    (let ((owner (unwrap! (nft-get-owner? ancestry-nft token-id) err-token-not-found)))
+        (asserts! (is-eq tx-sender owner) err-not-token-owner)
+        (asserts! (is-some (map-get? heritage-beneficiaries token-id)) err-no-beneficiary)
+        (map-delete heritage-beneficiaries token-id)
+        (ok true)
+    )
+)
+
+(define-public (activate-beneficiary-claim (token-id uint))
+    (let (
+        (owner (unwrap! (nft-get-owner? ancestry-nft token-id) err-token-not-found))
+        (beneficiary-data (unwrap! (map-get? heritage-beneficiaries token-id) err-no-beneficiary))
+    )
+        (asserts! (is-eq tx-sender owner) err-not-token-owner)
+        (asserts! (not (get can-claim beneficiary-data)) err-vesting-active)
+        (map-set heritage-beneficiaries token-id (merge beneficiary-data {can-claim: true}))
+        (ok true)
+    )
+)
+
+(define-public (claim-heritage (token-id uint))
+    (let (
+        (owner (unwrap! (nft-get-owner? ancestry-nft token-id) err-token-not-found))
+        (beneficiary-data (unwrap! (map-get? heritage-beneficiaries token-id) err-no-beneficiary))
+        (vesting-complete (>= stacks-block-height (+ (get designated-at beneficiary-data) (get vesting-period beneficiary-data))))
+    )
+        (asserts! (is-eq tx-sender (get beneficiary beneficiary-data)) err-not-beneficiary)
+        (asserts! (or (get can-claim beneficiary-data) vesting-complete) err-vesting-active)
+        (try! (nft-transfer? ancestry-nft token-id owner tx-sender))
+        (map-delete heritage-beneficiaries token-id)
+        (ok true)
+    )
+)
+
+(define-read-only (get-beneficiary-info (token-id uint))
+    (map-get? heritage-beneficiaries token-id)
+)
+
+(define-read-only (can-claim-heritage (token-id uint) (claimer principal))
+    (match (map-get? heritage-beneficiaries token-id)
+        beneficiary-data (let (
+            (is-beneficiary (is-eq claimer (get beneficiary beneficiary-data)))
+            (vesting-complete (>= stacks-block-height (+ (get designated-at beneficiary-data) (get vesting-period beneficiary-data))))
+            (manual-activation (get can-claim beneficiary-data))
+        )
+            (ok (and is-beneficiary (or manual-activation vesting-complete)))
+        )
+        (ok false)
     )
 )
