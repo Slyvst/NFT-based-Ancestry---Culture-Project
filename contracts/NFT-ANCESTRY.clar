@@ -29,6 +29,9 @@
 (define-constant err-not-beneficiary (err u118))
 (define-constant err-vesting-active (err u119))
 (define-constant err-no-beneficiary (err u120))
+(define-constant err-already-endorsed (err u121))
+(define-constant err-self-endorsement (err u122))
+(define-constant err-no-endorsement (err u123))
 
 (define-data-var last-token-id uint u0)
 (define-data-var mint-enabled bool true)
@@ -91,6 +94,13 @@
     designated-at: uint,
     can-claim: bool
 })
+
+(define-map token-endorsements {token-id: uint, endorser: principal} {
+    endorsed-at: uint,
+    endorsement-note: (string-ascii 100)
+})
+
+(define-map token-endorsement-counts uint uint)
 
 (define-public (get-last-token-id)
     (ok (var-get last-token-id))
@@ -640,4 +650,43 @@
         )
         (ok false)
     )
+)
+
+(define-public (endorse-heritage (token-id uint) (note (string-ascii 100)))
+    (let (
+        (owner (unwrap! (nft-get-owner? ancestry-nft token-id) err-token-not-found))
+        (current-count (default-to u0 (map-get? token-endorsement-counts token-id)))
+    )
+        (asserts! (not (is-eq tx-sender owner)) err-self-endorsement)
+        (asserts! (is-none (map-get? token-endorsements {token-id: token-id, endorser: tx-sender})) err-already-endorsed)
+        (map-set token-endorsements {token-id: token-id, endorser: tx-sender} {
+            endorsed-at: stacks-block-height,
+            endorsement-note: note
+        })
+        (map-set token-endorsement-counts token-id (+ current-count u1))
+        (ok (+ current-count u1))
+    )
+)
+
+(define-public (revoke-endorsement (token-id uint))
+    (let (
+        (endorsement (unwrap! (map-get? token-endorsements {token-id: token-id, endorser: tx-sender}) err-no-endorsement))
+        (current-count (default-to u1 (map-get? token-endorsement-counts token-id)))
+    )
+        (map-delete token-endorsements {token-id: token-id, endorser: tx-sender})
+        (map-set token-endorsement-counts token-id (- current-count u1))
+        (ok true)
+    )
+)
+
+(define-read-only (get-endorsement-count (token-id uint))
+    (default-to u0 (map-get? token-endorsement-counts token-id))
+)
+
+(define-read-only (get-endorsement (token-id uint) (endorser principal))
+    (map-get? token-endorsements {token-id: token-id, endorser: endorser})
+)
+
+(define-read-only (has-endorsed (token-id uint) (endorser principal))
+    (is-some (map-get? token-endorsements {token-id: token-id, endorser: endorser}))
 )
